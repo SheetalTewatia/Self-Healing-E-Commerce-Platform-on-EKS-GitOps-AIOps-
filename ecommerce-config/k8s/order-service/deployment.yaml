@@ -1,0 +1,57 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: order-service
+  namespace: ecommerce
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: order-service
+  template:
+    metadata:
+      labels:
+        app: order-service
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/path: "/actuator/prometheus"
+        prometheus.io/port: "8083"
+    spec:
+      containers:
+        - name: order-service
+          image: 535355705679.dkr.ecr.us-east-1.amazonaws.com/order-service:13
+          ports:
+            - containerPort: 8083
+          env:
+            - name: SPRING_DATA_MONGODB_URI
+              value: "mongodb://admin:password@mongodb:27017/orderdb?authSource=admin"
+            - name: PRODUCT_SERVICE_URL
+              value: "http://product-service:8082"
+            - name: NOTIFICATION_SERVICE_URL
+              value: "http://notification-service:8084"
+          readinessProbe:
+            httpGet:
+              path: /actuator/health
+              port: 8083
+            initialDelaySeconds: 20
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: "200m"
+              memory: "256Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: order-service
+  namespace: ecommerce
+spec:
+  type: ClusterIP
+  selector:
+    app: order-service
+  ports:
+    - port: 8083
+      targetPort: 8083

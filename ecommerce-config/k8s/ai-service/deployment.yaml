@@ -1,0 +1,71 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ai-service
+  namespace: ecommerce
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ai-service
+  template:
+    metadata:
+      labels:
+        app: ai-service
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/path: "/api/ai/health"
+        prometheus.io/port: "8085"
+    spec:
+      containers:
+        - name: ai-service
+          image: 535355705679.dkr.ecr.us-east-1.amazonaws.com/ai-service:latest
+          ports:
+            - containerPort: 8085
+          env:
+            - name: ANTHROPIC_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: ai-secrets
+                  key: anthropic-api-key
+            - name: PRODUCT_SERVICE_URL
+              value: "http://product-service:8082"
+            - name: ORDER_SERVICE_URL
+              value: "http://order-service:8083"
+            - name: USER_SERVICE_URL
+              value: "http://user-service:8081"
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: 1000m
+              memory: 1Gi
+          readinessProbe:
+            httpGet:
+              path: /api/ai/health
+              port: 8085
+            initialDelaySeconds: 30
+            periodSeconds: 10
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ai-service
+  namespace: ecommerce
+spec:
+  type: ClusterIP
+  selector:
+    app: ai-service
+  ports:
+    - port: 8085
+      targetPort: 8085
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: ai-secrets
+  namespace: ecommerce
+type: Opaque
+stringData:
+  anthropic-api-key: "REPLACE_WITH_YOUR_ANTHROPIC_API_KEY"

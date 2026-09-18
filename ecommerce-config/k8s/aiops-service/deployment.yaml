@@ -1,0 +1,98 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: aiops-service-account
+  namespace: ecommerce
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: aiops-cluster-role
+rules:
+  - apiGroups: [""]
+    resources: ["pods", "pods/log", "events"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["apps"]
+    resources: ["deployments", "deployments/scale"]
+    verbs: ["get", "list", "watch", "patch", "update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: aiops-cluster-role-binding
+subjects:
+  - kind: ServiceAccount
+    name: aiops-service-account
+    namespace: ecommerce
+roleRef:
+  kind: ClusterRole
+  name: aiops-cluster-role
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: aiops-service
+  namespace: ecommerce
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: aiops-service
+  template:
+    metadata:
+      labels:
+        app: aiops-service
+    spec:
+      serviceAccountName: aiops-service-account
+      containers:
+        - name: aiops-service
+          image: 535355705679.dkr.ecr.us-east-1.amazonaws.com/aiops-service:latest
+          ports:
+            - containerPort: 8086
+          env:
+            - name: ANTHROPIC_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: ai-secrets
+                  key: anthropic-api-key
+            - name: PROMETHEUS_URL
+              value: "http://monitoring-kube-prometheus-prometheus.monitoring:9090"
+            - name: NOTIFICATION_SERVICE_URL
+              value: "http://notification-service:8084"
+            - name: K8S_NAMESPACE
+              value: "ecommerce"
+            - name: ARGOCD_URL
+              value: "https://argocd-server.argocd"
+            - name: ARGOCD_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: ai-secrets
+                  key: argocd-token
+                  optional: true
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: 1000m
+              memory: 1Gi
+          readinessProbe:
+            httpGet:
+              path: /api/aiops/health
+              port: 8086
+            initialDelaySeconds: 30
+            periodSeconds: 10
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: aiops-service
+  namespace: ecommerce
+spec:
+  type: ClusterIP
+  selector:
+    app: aiops-service
+  ports:
+    - port: 8086
+      targetPort: 8086

@@ -1,0 +1,53 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: notification-service
+  namespace: ecommerce
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: notification-service
+  template:
+    metadata:
+      labels:
+        app: notification-service
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/path: "/actuator/prometheus"
+        prometheus.io/port: "8084"
+    spec:
+      containers:
+        - name: notification-service
+          image: 535355705679.dkr.ecr.us-east-1.amazonaws.com/notification-service:13
+          ports:
+            - containerPort: 8084
+          env:
+            - name: SPRING_DATA_MONGODB_URI
+              value: "mongodb://admin:password@mongodb:27017/notificationdb?authSource=admin"
+          readinessProbe:
+            httpGet:
+              path: /actuator/health
+              port: 8084
+            initialDelaySeconds: 20
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: "200m"
+              memory: "256Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: notification-service
+  namespace: ecommerce
+spec:
+  type: ClusterIP
+  selector:
+    app: notification-service
+  ports:
+    - port: 8084
+      targetPort: 8084

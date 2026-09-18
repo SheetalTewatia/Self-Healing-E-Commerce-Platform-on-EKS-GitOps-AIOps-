@@ -1,0 +1,32 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: ecommerce-app
+  namespace: argocd          # ArgoCD itself lives in the argocd namespace
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+
+  # ── Where to pull manifests from ──────────────────────────────────
+  # This is your GitOps config repo (NOT the source code repo)
+  # Jenkins updates image tags here → ArgoCD detects the change → deploys
+  source:
+    repoURL: https://github.com/Chirag390/ecommerce-config.git
+    targetRevision: main
+    path: k8s
+    directory:
+      recurse: true        # recurse into k8s/user-service/, k8s/product-service/, etc.
+
+  # ── Where to deploy ───────────────────────────────────────────────
+  destination:
+    server: https://kubernetes.default.svc   # The EKS cluster ArgoCD is running in
+    namespace: ecommerce
+
+  # ── Sync policy (auto-deploy on git change) ───────────────────────
+  syncPolicy:
+    automated:
+      prune: true      # Delete K8s resources that are removed from git
+      selfHeal: true   # If someone manually edits K8s, ArgoCD reverts it to match git
+    syncOptions:
+      - CreateNamespace=true   # Auto-create the ecommerce namespace if it doesn't exist
