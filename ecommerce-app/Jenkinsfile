@@ -1,0 +1,216 @@
+pipeline {
+    agent any
+
+    environment {
+        AWS_ACCOUNT_ID  = "535355705679"
+        AWS_REGION      = "us-east-1"
+        ECR_URL         = "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+        IMAGE_TAG       = "${BUILD_NUMBER}"
+        SONAR_HOST_URL  = "http://3.87.42.29:9000"
+        CONFIG_REPO     = "https://github.com/Chirag390/ecommerce-config.git"
+        AIOPS_URL       = "http://aiops-service.ecommerce.svc.cluster.local:8086"
+
+        SERVICES      = "user-service product-service order-service notification-service api-gateway frontend ai-service aiops-service"
+        JAVA_SERVICES = "user-service product-service order-service notification-service"
+
+        // Enhancement 1–5: Anthropic API key stored as Jenkins credential
+        ANTHROPIC_API_KEY = credentials('anthropic-api-key')
+    }
+
+    stages {
+
+        // Build + test each Java service with Maven (skip frontend, api-gateway, ai-service, aiops-service)
+        stage('Maven Build & Test') {
+            parallel {
+                stage('user-service') {
+                    steps { dir('user-service') { sh 'mvn clean package -B' } }
+                }
+                stage('product-service') {
+                    steps { dir('product-service') { sh 'mvn clean package -B' } }
+                }
+                stage('order-service') {
+                    steps { dir('order-service') { sh 'mvn clean package -B' } }
+                }
+                stage('notification-service') {
+                    steps { dir('notification-service') { sh 'mvn clean package -B' } }
+                }
+            }
+        }
+
+        stage('SonarQube Analysis') {
+            steps {
+                withSonarQubeEnv('SonarQube') {
+                    script {
+                        parallel(
+                            'user-service':         { dir('user-service')         { sh 'mvn sonar:sonar -Dsonar.projectKey=user-service -B' } },
+                            'product-service':      { dir('product-service')      { sh 'mvn sonar:sonar -Dsonar.projectKey=product-service -B' } },
+                            'order-service':        { dir('order-service')        { sh 'mvn sonar:sonar -Dsonar.projectKey=order-service -B' } },
+                            'notification-service': { dir('notification-service') { sh 'mvn sonar:sonar -Dsonar.projectKey=notification-service -B' } }
+                        )
+                    }
+                }
+            }
+        }
+
+        stage('Quality Gate') {
+            steps {
+                timeout(time: 5, unit: 'MINUTES') {
+                    waitForQualityGate abortPipeline: true
+                }
+            }
+        }
+
+        // Build all 8 Docker images in parallel
+        stage('Docker Build') {
+            parallel {
+                stage('user-service')         { steps { sh "docker build -t user-service:${IMAGE_TAG} ./user-service" } }
+                stage('product-service')      { steps { sh "docker build -t product-service:${IMAGE_TAG} ./product-service" } }
+                stage('order-service')        { steps { sh "docker build -t order-service:${IMAGE_TAG} ./order-service" } }
+                stage('notification-service') { steps { sh "docker build -t notification-service:${IMAGE_TAG} ./notification-service" } }
+                stage('api-gateway')          { steps { sh "docker build -t api-gateway:${IMAGE_TAG} ./api-gateway" } }
+                stage('frontend')             { steps { sh "docker build -t frontend:${IMAGE_TAG} ./frontend" } }
+                stage('ai-service')           { steps { sh "docker build -t ai-service:${IMAGE_TAG} ./ai-service" } }
+                stage('aiops-service')        { steps { sh "docker build -t aiops-service:${IMAGE_TAG} ./aiops-service" } }
+            }
+        }
+
+        // Enhancement 2 — Trivy scans output JSON; Claude CVE advisor runs after all scans
+        stage('Trivy Security Scan') {
+            environment {
+                TMPDIR       = '/var/lib/jenkins/trivy-tmp'
+                TRIVY_REPORTS = '/tmp/trivy-reports'
+            }
+            steps {
+                sh 'mkdir -p /var/lib/jenkins/trivy-cache /var/lib/jenkins/trivy-tmp ${TRIVY_REPORTS}'
+                script {
+                    ['user-service','product-service','order-service','notification-service',
+                     'api-gateway','frontend','ai-service','aiops-service'].each { svc ->
+                        sh """
+                            trivy image --exit-code 0 --severity CRITICAL,HIGH --no-progress \
+                                --scanners vuln --cache-dir /var/lib/jenkins/trivy-cache \
+                                --format json --output ${TRIVY_REPORTS}/trivy-${svc}.json \
+                                ${svc}:${IMAGE_TAG}
+                        """
+                    }
+                }
+                // AI CVE Advisory — Claude analyses all scan reports
+                sh '''
+                    pip3 install -q anthropic
+                    python3 scripts/ai_cve_advisor.py /tmp/trivy-reports/ || true
+                '''
+            }
+        }
+
+        // Push all 8 images to ECR
+        stage('Push to ECR') {
+            steps {
+                sh """
+                    aws ecr get-login-password --region ${AWS_REGION} \
+                      | docker login --username AWS --password-stdin ${ECR_URL}
+                """
+                script {
+                    ['user-service','product-service','order-service','notification-service',
+                     'api-gateway','frontend','ai-service','aiops-service'].each { svc ->
+                        sh """
+                            docker tag ${svc}:${IMAGE_TAG} ${ECR_URL}/${svc}:${IMAGE_TAG}
+                            docker push ${ECR_URL}/${svc}:${IMAGE_TAG}
+                        """
+                    }
+                }
+            }
+        }
+
+        // Update image tags in GitOps config repo → ArgoCD picks up and deploys
+        stage('Update GitOps Repo') {
+            steps {
+                withCredentials([usernamePassword(credentialsId: 'github-creds',
+                    usernameVariable: 'GIT_USER', passwordVariable: 'GIT_TOKEN')]) {
+                    sh """
+                        rm -rf config-repo
+                        git clone https://${GIT_USER}:${GIT_TOKEN}@github.com/Chirag390/ecommerce-config.git config-repo
+                        cd config-repo
+                    """
+                    script {
+                        ['user-service','product-service','order-service','notification-service',
+                         'api-gateway','frontend','ai-service','aiops-service'].each { svc ->
+                            sh """
+                                sed -i 's|image: ${ECR_URL}/${svc}:.*|image: ${ECR_URL}/${svc}:${IMAGE_TAG}|' \
+                                    config-repo/k8s/${svc}/deployment.yaml
+                            """
+                        }
+                    }
+                    sh """
+                        cd config-repo
+                        git config user.email "jenkins@ci.local"
+                        git config user.name "Jenkins CI"
+                        git add .
+                        git commit -m "CI: update all images to tag ${IMAGE_TAG} [skip ci]"
+                        git push
+                        cd ..
+                        rm -rf config-repo
+                    """
+                }
+            }
+        }
+
+        // Enhancement 3 — notify AIOps service to start post-deploy health watch
+        stage('Post-Deploy Watch') {
+            steps {
+                sh """
+                    curl -s -X POST ${AIOPS_URL}/api/aiops/post-deploy-watch \
+                        -H 'Content-Type: application/json' \
+                        -d '{"image_tag":"${IMAGE_TAG}","watch_minutes":5}' || true
+                """
+                echo "AIOps auto-rollback watcher started for build ${IMAGE_TAG}"
+            }
+        }
+    }
+
+    post {
+        always {
+            // Clean up local Docker images
+            script {
+                ['user-service','product-service','order-service','notification-service',
+                 'api-gateway','frontend','ai-service','aiops-service'].each { svc ->
+                    sh "docker rmi ${svc}:${IMAGE_TAG} ${ECR_URL}/${svc}:${IMAGE_TAG} || true"
+                }
+            }
+        }
+
+        // Enhancement 1 — AI Build Failure Analyser
+        failure {
+            sh '''
+                pip3 install -q anthropic
+                LOG_PATH="/var/lib/jenkins/jobs/${JOB_NAME}/builds/${BUILD_NUMBER}/log"
+                if [ -f "$LOG_PATH" ]; then
+                    python3 scripts/ai_build_analyser.py "$LOG_PATH" || true
+                else
+                    echo "[ai-build-analyser] Log not found at $LOG_PATH"
+                fi
+            '''
+        }
+
+        // Enhancement 4 — AI Release Notes Generator
+        success {
+            withCredentials([usernamePassword(credentialsId: 'github-creds',
+                usernameVariable: 'GIT_USER', passwordVariable: 'GIT_TOKEN')]) {
+                sh '''
+                    pip3 install -q anthropic
+                    python3 scripts/ai_release_notes.py ${BUILD_NUMBER} HEAD~1 || true
+
+                    # Commit CHANGELOG.md back to the source repo if it was updated
+                    if git diff --quiet CHANGELOG.md 2>/dev/null; then
+                        echo "[ai-release-notes] No CHANGELOG changes to commit"
+                    else
+                        git config user.email "jenkins@ci.local"
+                        git config user.name "Jenkins CI"
+                        git add CHANGELOG.md
+                        git commit -m "docs: AI release notes for build #${BUILD_NUMBER} [skip ci]"
+                        git push https://${GIT_USER}:${GIT_TOKEN}@github.com/Chirag390/ecommerce-app.git HEAD:main || true
+                    fi
+                '''
+            }
+            echo "✅ All 8 services built, scanned, and pushed. ArgoCD will deploy."
+        }
+    }
+}

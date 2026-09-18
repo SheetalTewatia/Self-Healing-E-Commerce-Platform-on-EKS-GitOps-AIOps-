@@ -1,0 +1,61 @@
+server:
+  port: 8080
+
+spring:
+  application:
+    name: api-gateway
+  cloud:
+    gateway:
+      # Allow browser requests from any origin (CORS)
+      globalcors:
+        corsConfigurations:
+          '[/**]':
+            allowedOrigins: "*"
+            allowedMethods: "*"
+            allowedHeaders: "*"
+      routes:
+        # Route /api/users/** → user-service
+        - id: user-service
+          uri: ${USER_SERVICE_URL:http://localhost:8081}
+          predicates:
+            - Path=/api/users/**
+
+        # Route /api/products/** → product-service
+        - id: product-service
+          uri: ${PRODUCT_SERVICE_URL:http://localhost:8082}
+          predicates:
+            - Path=/api/products/**
+
+        # Route /api/orders/** → order-service
+        - id: order-service
+          uri: ${ORDER_SERVICE_URL:http://localhost:8083}
+          predicates:
+            - Path=/api/orders/**
+
+        # Route /api/notifications/** → notification-service
+        - id: notification-service
+          uri: ${NOTIFICATION_SERVICE_URL:http://localhost:8084}
+          predicates:
+            - Path=/api/notifications/**
+
+        # Route /api/ai/** → ai-service (RAG + Shopping Agent)
+        - id: ai-service
+          uri: ${AI_SERVICE_URL:http://localhost:8085}
+          predicates:
+            - Path=/api/ai/**
+
+        # Route /api/aiops/** → aiops-service (AIOps Agent)
+        - id: aiops-service
+          uri: ${AIOPS_SERVICE_URL:http://localhost:8086}
+          predicates:
+            - Path=/api/aiops/**
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,prometheus
+  metrics:
+    export:
+      prometheus:
+        enabled: true
